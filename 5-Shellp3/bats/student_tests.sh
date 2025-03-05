@@ -194,3 +194,74 @@ EOF
     # Check exact match
     [ "$stripped_output" = "$expected_output" ]
 }
+
+@test "Redirection: echo test > test.txt" {
+    run "./dsh" <<EOF
+echo test > test.txt
+cat test.txt
+rm test.txt
+rc
+exit
+EOF
+    # Although 'false' returns 1, the pipeline exit code is that of the last command ('echo hi'),
+    # which should be 0.
+    stripped_output=$(echo "$output" | tr -d '[:space:]')
+
+    expected_output="testdsh3>dsh3>dsh3>dsh3>0dsh3>cmdloopreturned0"
+
+    echo "Captured stdout:" 
+    echo "Output: $output"
+    echo "Exit Status: $status"
+    echo "${stripped_output} -> ${expected_output}"
+
+    # Check exact match
+    [ "$stripped_output" = "$expected_output" ]
+}
+
+@test "Redirection: echo test >> test.txt" {
+    run "./dsh" <<EOF
+echo test > test.txt
+cat test.txt
+echo test1 >> test.txt
+cat test.txt
+rm test.txt
+rc
+exit
+EOF
+    # Although 'false' returns 1, the pipeline exit code is that of the last command ('echo hi'),
+    # which should be 0.
+    stripped_output=$(echo "$output" | tr -d '[:space:]')
+
+    expected_output="testtesttest1dsh3>dsh3>dsh3>dsh3>dsh3>dsh3>0dsh3>cmdloopreturned0"
+
+    echo "Captured stdout:" 
+    echo "Output: $output"
+    echo "Exit Status: $status"
+    echo "${stripped_output} -> ${expected_output}"
+
+    # Check exact match
+    [ "$stripped_output" = "$expected_output" ]
+}
+
+@test "Redirection: ls | grep "dragon" >> test.txt" {
+    run "./dsh" <<EOF
+ls | grep "dragon" > test.txt
+cat test.txt
+rm test.txt
+rc
+exit
+EOF
+    # Although 'false' returns 1, the pipeline exit code is that of the last command ('echo hi'),
+    # which should be 0.
+    stripped_output=$(echo "$output" | tr -d '[:space:]')
+
+    expected_output="dragon.cdsh3>dsh3>dsh3>dsh3>0dsh3>cmdloopreturned0"
+
+    echo "Captured stdout:" 
+    echo "Output: $output"
+    echo "Exit Status: $status"
+    echo "${stripped_output} -> ${expected_output}"
+
+    # Check exact match
+    [ "$stripped_output" = "$expected_output" ]
+}

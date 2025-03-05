@@ -53,6 +53,11 @@
  *  Standard Library Functions You Might Want To Consider Using (assignment 2+)
  *      fork(), execvp(), exit(), chdir()
  */
+
+static char *redir_in[CMD_MAX];   // input redirection file for each command
+static char *redir_out[CMD_MAX];  // output redirection file for each command
+static int redir_append[CMD_MAX]; // 0 for ">", 1 for ">>"
+
 void trim_spaces(char *str) {
     char *start = str;
     char *end;
@@ -72,17 +77,7 @@ void trim_spaces(char *str) {
     *(end + 1) = '\0';
 }
 
-/*
- * build_cmd_buff:
- * Tokenizes a single command string (cmd_line) into a cmd_buff_t.
- * The tokenization splits the command into tokens based on whitespace,
- * handling quoted tokens. If an opening double quote is unmatched, it is
- * treated as literal and included in the token.
- *
- * The token pointers in argv refer into the _cmd_buffer.
- *
- * Returns OK on success or an error code if too many tokens or an oversized token is encountered.
- */
+
 int build_cmd_buff(char *cmd_line, cmd_buff_t *cmd_buff) {
     // Save the command string in _cmd_buffer so that argv pointers remain valid.
     cmd_buff->_cmd_buffer = cmd_line;
@@ -142,38 +137,99 @@ int build_cmd_buff(char *cmd_line, cmd_buff_t *cmd_buff) {
     return OK;
 }
 
-/*
- * build_cmd_list:
- * Splits the overall command line (cmd_line) into individual commands using the PIPE_STRING delimiter.
- * For each command segment, it trims whitespace and then tokenizes it by calling build_cmd_buff.
- * The tokenized results are stored in the commands array of the command_list_t.
- *
- * Returns OK on success or an error code if too many commands or if an individual command fails to tokenize.
- */
+int process_redirections(int cmd_index, cmd_buff_t *cmd) {
+    redir_in[cmd_index] = NULL;
+    redir_out[cmd_index] = NULL;
+    redir_append[cmd_index] = 0;
+    
+    int new_argc = 0;
+    for (int i = 0; i < cmd->argc; i++) {
+        if (strcmp(cmd->argv[i], "<") == 0) {
+            if (i + 1 < cmd->argc) {
+                redir_in[cmd_index] = cmd->argv[i + 1];
+                i++; // Skip filename token.
+            } else {
+                fprintf(stderr, "Syntax error: no input file specified\n");
+                return -1;
+            }
+        } else if (strcmp(cmd->argv[i], ">") == 0) {
+            if (i + 1 < cmd->argc) {
+                redir_out[cmd_index] = cmd->argv[i + 1];
+                redir_append[cmd_index] = 0;
+                i++; // Skip filename.
+            } else {
+                fprintf(stderr, "Syntax error: no output file specified\n");
+                return -1;
+            }
+        } else if (strcmp(cmd->argv[i], ">>") == 0) {
+            if (i + 1 < cmd->argc) {
+                redir_out[cmd_index] = cmd->argv[i + 1];
+                redir_append[cmd_index] = 1;
+                i++; // Skip filename.
+            } else {
+                fprintf(stderr, "Syntax error: no output file specified for append\n");
+                return -1;
+            }
+        } else {
+            cmd->argv[new_argc++] = cmd->argv[i];
+        }
+    }
+    cmd->argc = new_argc;
+    cmd->argv[new_argc] = NULL;  // Ensure NULL termination.
+    return 0;
+}
+
 int build_cmd_list(char *cmd_line, command_list_t *clist) {
     clist->num = 0;
-
-    // Use strtok to split by the pipe delimiter.
     char *token = strtok(cmd_line, PIPE_STRING);
     while (token != NULL) {
         if (clist->num >= CMD_MAX)
             return ERR_TOO_MANY_COMMANDS;
-
         trim_spaces(token);
-
-        // Tokenize this command segment.
         int ret = build_cmd_buff(token, &clist->commands[clist->num]);
         if (ret != OK)
             return ret;
-
+        ret = process_redirections(clist->num, &clist->commands[clist->num]);
+        if (ret != 0)
+            return ret;
         clist->num++;
         token = strtok(NULL, PIPE_STRING);
     }
-
     if (clist->num == 0)
         return WARN_NO_CMDS;
-
     return OK;
+}
+
+void apply_redirections(int cmd_index) {
+    if (redir_in[cmd_index] != NULL) {
+        int fd_in = open(redir_in[cmd_index], O_RDONLY);
+        if (fd_in < 0) {
+            perror("open input redirection");
+            exit(ERR_EXEC_CMD);
+        }
+        if (dup2(fd_in, STDIN_FILENO) < 0) {
+            perror("dup2 input redirection");
+            exit(ERR_EXEC_CMD);
+        }
+        close(fd_in);
+    }
+    if (redir_out[cmd_index] != NULL) {
+        int flags = O_WRONLY | O_CREAT;
+        if (redir_append[cmd_index])
+            flags |= O_APPEND;
+        else
+            flags |= O_TRUNC;
+        int fd_out = open(redir_out[cmd_index], flags, 0644);
+        if (fd_out < 0) {
+            perror("open output redirection");
+            exit(ERR_EXEC_CMD);
+        }
+        if (dup2(fd_out, STDOUT_FILENO) < 0) {
+            perror("dup2 output redirection");
+            exit(ERR_EXEC_CMD);
+        }
+        close(fd_out);
+    }
 }
 
 int execute_pipeline(command_list_t *clist) {
@@ -196,6 +252,7 @@ int execute_pipeline(command_list_t *clist) {
             return ERR_MEMORY;
         }
         if (pid == 0) {  /* Child process */
+            /* Set up pipe redirection if not first/last command */
             if (i != 0) {
                 if (dup2(pipefds[(i - 1) * 2], STDIN_FILENO) < 0) {
                     perror("dup2 - stdin");
@@ -208,10 +265,11 @@ int execute_pipeline(command_list_t *clist) {
                     exit(ERR_EXEC_CMD);
                 }
             }
-            for (int j = 0; j < 2 * num_pipes; j++) {
+            /* Close all pipe file descriptors in child */
+            for (int j = 0; j < 2 * num_pipes; j++)
                 close(pipefds[j]);
-            }
-            /* Ensure argv is NULL-terminated */
+            /* Apply redirections specified by the user */
+            apply_redirections(i);
             clist->commands[i].argv[clist->commands[i].argc] = NULL;
             execvp(clist->commands[i].argv[0], clist->commands[i].argv);
             if (errno == ENOENT)
@@ -225,14 +283,12 @@ int execute_pipeline(command_list_t *clist) {
             pids[i] = pid;
         }
     }
-    for (int i = 0; i < 2 * num_pipes; i++) {
+    for (int i = 0; i < 2 * num_pipes; i++)
         close(pipefds[i]);
-    }
     int last_exit = 0;
     for (int i = 0; i < num_cmds; i++) {
         int status;
         waitpid(pids[i], &status, 0);
-        /* The pipeline's exit code is defined as that of the last command */
         if (i == num_cmds - 1) {
             if (WIFEXITED(status))
                 last_exit = WEXITSTATUS(status);
@@ -274,7 +330,7 @@ int exec_local_cmd_loop() {
             continue;
         }
 
-        /* If there is only one command, check for built-in commands */
+        /* If only one command, check for built-in commands */
         if (clist.num == 1) {
             char *cmd_name = clist.commands[0].argv[0];
             if (strcmp(cmd_name, "dragon") == 0) {
@@ -294,17 +350,15 @@ int exec_local_cmd_loop() {
                 printf("%d\n", rc);
                 continue;
             }
-        }
-
-        /* Execute external command or pipeline */
-        if (clist.num == 1) {
-            /* Single command (non-pipeline) */
+            /* Single external command execution with redirection support */
             pid_t pid = fork();
             if (pid < 0) {
                 perror("fork");
                 continue;
             }
-            if (pid == 0) {
+            if (pid == 0) {  /* Child process */
+                /* Apply any redirections for command 0 */
+                apply_redirections(0);
                 clist.commands[0].argv[clist.commands[0].argc] = NULL;
                 execvp(clist.commands[0].argv[0], clist.commands[0].argv);
                 if (errno == ENOENT)
@@ -323,7 +377,7 @@ int exec_local_cmd_loop() {
                     rc = -1;
             }
         } else {
-            /* Pipeline of commands */
+            /* Pipeline execution */
             rc = execute_pipeline(&clist);
         }
     }
